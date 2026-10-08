@@ -116,7 +116,7 @@ func TestSubfoldersAndAgentsNest(t *testing.T) {
 func gotoRow(m Model, path string) Model {
 	for i, r := range m.rows {
 		if r.folder.Path == path {
-			m.treeCursor = i
+			m.treeCursor, m.listCursor = i, 0
 		}
 	}
 	return m

@@ -26,6 +26,8 @@ type item struct {
 	folder  *Folder
 	session *Session
 	agent   *Agent
+	header  string // a divider naming the folder of the sessions below it
+	count   int
 }
 
 type treeRow struct {
@@ -165,6 +167,7 @@ func (m Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.load()
 	case "tab":
 		m.focus = 1 - m.focus
+		m.settle(1)
 	case "up", "k":
 		m.move(-1)
 	case "down", "j":
@@ -210,6 +213,7 @@ func (m Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.flatten()
 			} else {
 				m.focus, m.listCursor = listPane, 0
+				m.settle(1)
 			}
 			return m, nil
 		}
@@ -253,6 +257,7 @@ func (m *Model) move(delta int) {
 		m.listCursor = 0
 	} else {
 		m.listCursor = clamp(m.listCursor+delta, 0, len(m.list())-1)
+		m.settle(map[bool]int{true: 1, false: -1}[delta > 0])
 	}
 }
 
@@ -286,6 +291,7 @@ func (m *Model) expand() {
 	}
 	if len(f.Folders) == 0 || m.expanded[f.Path] {
 		m.focus, m.listCursor = listPane, 0
+		m.settle(1)
 		return
 	}
 	m.expanded[f.Path] = true
@@ -343,6 +349,7 @@ func (m *Model) rebuild() {
 		}
 	}
 	m.listCursor = clamp(m.listCursor, 0, len(m.list())-1)
+	m.settle(1)
 }
 
 func (m *Model) flatten() {
@@ -402,24 +409,54 @@ func (m Model) list() []item {
 		return nil
 	}
 	var out []item
-	sessions := f.Sessions
-	if isRunningPath(f.Path) {
-		sessions = f.All() // the running section lists everything live beneath it
-	} else {
-		for _, c := range f.Folders {
-			out = append(out, item{folder: c})
-		}
-	}
-	for i := range sessions {
-		s := &sessions[i]
-		out = append(out, item{session: s})
-		if m.shownAgents[s.ID] {
-			for j := range s.Agents {
-				out = append(out, item{session: s, agent: &s.Agents[j]})
+	add := func(sessions []Session) {
+		for i := range sessions {
+			s := &sessions[i]
+			out = append(out, item{session: s})
+			if m.shownAgents[s.ID] {
+				for j := range s.Agents {
+					out = append(out, item{session: s, agent: &s.Agents[j]})
+				}
 			}
 		}
 	}
+	if !isRunningPath(f.Path) {
+		for _, c := range f.Folders {
+			out = append(out, item{folder: c})
+		}
+		add(f.Sessions)
+		return out
+	}
+	// The running section is its tree flattened: a divider per folder,
+	// then the sessions running in it.
+	var walk func(*Folder)
+	walk = func(n *Folder) {
+		if len(n.Sessions) > 0 {
+			out = append(out, item{header: strings.TrimPrefix(n.Path, runningPath+"/"), count: len(n.Sessions)})
+			add(n.Sessions)
+		}
+		for _, c := range n.Folders {
+			walk(c)
+		}
+	}
+	walk(f)
 	return out
+}
+
+// settle moves the list cursor off divider rows, in direction dir.
+func (m *Model) settle(dir int) {
+	list := m.list()
+	for m.listCursor >= 0 && m.listCursor < len(list) && list[m.listCursor].header != "" {
+		m.listCursor += dir
+	}
+	if m.listCursor >= len(list) || m.listCursor < 0 {
+		m.listCursor = clamp(m.listCursor, 0, len(list)-1)
+		if dir > 0 {
+			m.settle(-1)
+		} else if len(list) > 0 && list[m.listCursor].header != "" {
+			m.settle(1)
+		}
+	}
 }
 
 func (m Model) current() (item, bool) {
@@ -453,6 +490,7 @@ var (
 	liveCol  = lipgloss.Color("2")
 	busyCol  = lipgloss.Color("3")
 	muted    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	green    = lipgloss.NewStyle().Foreground(liveCol)
 	bold     = lipgloss.NewStyle().Bold(true)
 	selected = lipgloss.NewStyle().Reverse(true)
 	dimSel   = lipgloss.NewStyle().Bold(true).Foreground(accent)
@@ -478,7 +516,7 @@ func (m Model) render() string {
 	if runN > 0 {
 		runH := min(runN+2, topH/2)
 		foldersH = topH - runH
-		tree = panel("Running", fmt.Sprint(m.running.Live), m.renderRows(0, runN, leftW-4, runH-2), leftW, runH, m.focus == treePane && isInRunning) + "\n"
+		tree = panel("Running", fmt.Sprint(m.running.Live), m.renderRows(0, runN, leftW-4, runH-2), leftW, runH, m.focus == treePane && isInRunning, liveCol) + "\n"
 	}
 	total := 0
 	if m.root != nil {
@@ -566,6 +604,8 @@ func (m Model) renderRows(from, to, w, h int) string {
 			lines = append(lines, selected.Render(name+pad+count))
 		case i == m.treeCursor:
 			lines = append(lines, dimSel.Render(name+pad+count))
+		case isRunning:
+			lines = append(lines, name+pad+green.Render(count))
 		default:
 			lines = append(lines, name+pad+muted.Render(count))
 		}
@@ -590,8 +630,21 @@ func (m Model) renderList(w, h int) string {
 	f := m.folder()
 	list := m.list()
 	var lines []string
-	top := scrollTop(m.listCursor, h, len(list))
-	for i := top; i < min(len(list), top+h); i++ {
+	cursorLine := 0
+	for i := range list {
+		if i == m.listCursor {
+			cursorLine = len(lines)
+		}
+		if it := list[i]; it.header != "" {
+			label := " " + bold.Render(ansi.Truncate(it.header, w-12, "…")) + " "
+			count := " " + fmt.Sprint(it.count)
+			rule := strings.Repeat("─", max(0, w-2-lipgloss.Width(label)-lipgloss.Width(count)))
+			if i > 0 {
+				lines = append(lines, "")
+			}
+			lines = append(lines, muted.Render("──")+label+muted.Render(rule)+green.Render(count))
+			continue
+		}
 		left, right, markCol, isDim := m.itemText(f, list[i])
 		room := w - 1 - len([]rune(right))
 		left = ansi.Truncate(left, room, "…")
@@ -616,7 +669,8 @@ func (m Model) renderList(w, h int) string {
 	if len(list) == 0 && f != nil {
 		lines = append(lines, muted.Render("no sessions at this level"))
 	}
-	return fill(lines, w, h)
+	top := scrollTop(cursorLine, h, len(lines))
+	return fill(lines[top:], w, h)
 }
 
 // itemText lays out one right-pane row: the text, the right-hand column,
@@ -652,11 +706,6 @@ func (m Model) itemText(f *Folder, it item) (left, right string, markCol color.C
 			}
 		}
 		text := s.Title
-		if f != nil && isRunningPath(f.Path) {
-			if rel := strings.TrimPrefix(strings.TrimPrefix(DisplayPath(s.Cwd, m.homeDir), strings.TrimPrefix(f.Path, runningPath+"/")), "/"); rel != "" {
-				text += "  · " + rel
-			}
-		}
 		if n := agentCount(s.Agents); n > 0 {
 			fold := "▸"
 			if m.shownAgents[s.ID] {
@@ -775,14 +824,15 @@ func (m Model) footer() string {
 
 // panel draws body inside a rounded border with title set into the top
 // edge and right at its end; focus colours the border.
-func panel(title, right, body string, w, h int, isFocused bool) string {
-	border := muted
-	if isFocused {
-		border = lipgloss.NewStyle().Foreground(accent)
-	}
-	titleStyle := bold
-	if isFocused {
-		titleStyle = bold.Foreground(accent)
+func panel(title, right, body string, w, h int, isFocused bool, tone ...color.Color) string {
+	border, titleStyle := muted, bold
+	switch {
+	case len(tone) > 0 && isFocused:
+		border, titleStyle = lipgloss.NewStyle().Foreground(tone[0]).Bold(true), bold.Foreground(tone[0])
+	case len(tone) > 0:
+		border, titleStyle = lipgloss.NewStyle().Foreground(tone[0]), bold.Foreground(tone[0])
+	case isFocused:
+		border, titleStyle = lipgloss.NewStyle().Foreground(accent), bold.Foreground(accent)
 	}
 	inner := w - 2
 	t := ""
@@ -794,7 +844,7 @@ func panel(title, right, body string, w, h int, isFocused bool) string {
 		r = " " + right + " "
 	}
 	gap := max(0, inner-1-lipgloss.Width(t)-lipgloss.Width(r)-1)
-	top := border.Render("╭─") + t + border.Render(strings.Repeat("─", gap)) + muted.Render(r) + border.Render("─╮")
+	top := border.Render("╭─") + t + border.Render(strings.Repeat("─", gap)) + map[bool]lipgloss.Style{true: titleStyle.UnsetBold(), false: muted}[len(tone) > 0].Render(r) + border.Render("─╮")
 	lines := []string{top}
 	for _, l := range strings.Split(fill(strings.Split(body, "\n"), inner-2, h-2), "\n") {
 		lines = append(lines, border.Render("│")+" "+l+" "+border.Render("│"))
