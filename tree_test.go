@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -71,7 +72,8 @@ func TestKeysExpandFilterAndResume(t *testing.T) {
 	}
 
 	m = press(m, "esc", "/", "esc") // clear the filter
-	m = press(m, "down", "tab")     // ~ : its subfolder, then session d
+	m = gotoRow(m, "~")
+	m = press(m, "tab") // ~ : its subfolder, then session d
 	if it, _ := m.current(); it.folder == nil || it.folder.Name != "work/apps" {
 		t.Fatalf("first item under ~ should be its subfolder, got %+v", it)
 	}
@@ -92,7 +94,8 @@ func TestSubfoldersAndAgentsNest(t *testing.T) {
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
 	next, _ = next.Update(loadedMsg{sessions: sessions})
 	m = next.(Model)
-	m = press(m, "down", "tab", "enter") // ~ → work/apps
+	m = gotoRow(m, "~")
+	m = press(m, "tab", "enter") // ~ → work/apps
 	if f := m.folder(); f == nil || f.Name != "work/apps" {
 		t.Fatalf("entered %+v", m.folder())
 	}
@@ -108,6 +111,15 @@ func TestSubfoldersAndAgentsNest(t *testing.T) {
 	if !strings.Contains(ansi.Strip(m.render()), "2 agents") {
 		t.Fatal("session row should count its agents")
 	}
+}
+
+func gotoRow(m Model, path string) Model {
+	for i, r := range m.rows {
+		if r.folder.Path == path {
+			m.treeCursor = i
+		}
+	}
+	return m
 }
 
 func press(m Model, keys ...string) Model {
@@ -148,3 +160,19 @@ func ids(ss []Session) []string {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+func TestResolverDecodesProjectKeyWhenCwdIsGone(t *testing.T) {
+	root := t.TempDir()
+	want := root + "/my-app/.config/v1.2"
+	if err := os.MkdirAll(want, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	key := strings.NewReplacer("/", "-", ".", "-").Replace(want)
+	r := newFolderResolver()
+	if got := r.resolve("/Users/someone/elsewhere", key); got != want {
+		t.Fatalf("decoded %q, want %q", got, want)
+	}
+	if got := r.resolve(root, key); got != root {
+		t.Fatalf("existing cwd should win, got %q", got)
+	}
+}

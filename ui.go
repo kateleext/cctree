@@ -73,7 +73,7 @@ type liveMsg map[string]LiveSession
 type tickMsg struct{}
 
 func NewModel(store Store) Model {
-	return Model{store: store, homeDir: home(), now: time.Now, expanded: map[string]bool{"~": true}, shownAgents: map[string]bool{}, isLoading: true}
+	return Model{store: store, homeDir: home(), now: time.Now, expanded: map[string]bool{"~": true, runningPath: true}, shownAgents: map[string]bool{}, isLoading: true}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -327,8 +327,9 @@ func (m *Model) rebuild() {
 		}
 	}
 	m.root = BuildTree(shown, m.homeDir)
-	m.running = &Folder{Path: runningPath, Name: "● running", Sessions: live, Total: len(live), Live: len(live)}
-	sortSessions(m.running.Sessions)
+	m.running = BuildTree(live, m.homeDir)
+	m.running.Path, m.running.Name = runningPath, "● running"
+	prefixPaths(m.running.Folders, runningPath+"/")
 	m.flatten()
 	m.treeCursor = 0
 	for i, r := range m.rows {
@@ -341,23 +342,28 @@ func (m *Model) rebuild() {
 
 func (m *Model) flatten() {
 	m.rows = m.rows[:0]
-	if m.running != nil && m.running.Total > 0 {
-		m.rows = append(m.rows, treeRow{folder: m.running})
-	}
 	if m.root == nil {
 		return
 	}
 	isAllOpen := m.filter != "" || m.isLiveOnly
-	var walk func(*Folder, int)
-	walk = func(f *Folder, depth int) {
+	var walk func(f *Folder, depth int, isOpen bool)
+	walk = func(f *Folder, depth int, isOpen bool) {
 		for _, c := range f.Folders {
 			m.rows = append(m.rows, treeRow{folder: c, depth: depth})
-			if isAllOpen || m.expanded[c.Path] {
-				walk(c, depth+1)
+			if isOpen || m.expanded[c.Path] {
+				walk(c, depth+1, isOpen)
 			}
 		}
 	}
-	walk(m.root, 0)
+	// The running section is its own tree of just the folders with live
+	// sessions, always open beneath its header.
+	if m.running != nil && m.running.Total > 0 {
+		m.rows = append(m.rows, treeRow{folder: m.running})
+		if m.expanded[runningPath] {
+			walk(m.running, 1, true)
+		}
+	}
+	walk(m.root, 0, isAllOpen)
 	m.treeCursor = clamp(m.treeCursor, 0, len(m.rows)-1)
 }
 
@@ -391,10 +397,8 @@ func (m Model) list() []item {
 		return nil
 	}
 	var out []item
-	if f.Path != runningPath {
-		for _, c := range f.Folders {
-			out = append(out, item{folder: c})
-		}
+	for _, c := range f.Folders {
+		out = append(out, item{folder: c})
 	}
 	for i := range f.Sessions {
 		s := &f.Sessions[i]
@@ -510,17 +514,25 @@ func (m Model) renderTree(w, h int) string {
 	for i := top; i < min(len(m.rows), top+h); i++ {
 		row := m.rows[i]
 		f := row.folder
+		isRunning := isRunningPath(f.Path)
 		marker := "  "
 		if len(f.Folders) > 0 {
 			marker = "▸ "
-			if m.expanded[f.Path] || m.filter != "" || m.isLiveOnly {
+			if m.expanded[f.Path] || m.filter != "" || m.isLiveOnly || (isRunning && f.Path != runningPath) {
 				marker = "▾ "
 			}
 		}
 		name := strings.Repeat("  ", row.depth) + marker + f.Name
 		count := fmt.Sprint(f.Total)
 		liveTxt := ""
-		if f.Live > 0 && f.Path != runningPath {
+		if isRunning {
+			count = ""
+			if f.Path != runningPath {
+				liveTxt = fmt.Sprintf("●%d", f.Live)
+			} else {
+				count = fmt.Sprint(f.Live)
+			}
+		} else if f.Live > 0 {
 			liveTxt = fmt.Sprintf("●%d ", f.Live)
 		}
 		room := w - len([]rune(count)) - len([]rune(liveTxt)) - 1
@@ -549,12 +561,12 @@ func (m Model) renderList(w, h int) string {
 	list := m.list()
 	var lines []string
 	if f != nil {
-		label := f.Path
+		label := strings.TrimPrefix(f.Path, runningPath+"/")
 		if f.Path == runningPath {
 			label = "running now"
 		}
 		here := fmt.Sprintf("  %d here", len(f.Sessions))
-		if len(f.Folders) > 0 && f.Path != runningPath {
+		if len(f.Folders) > 0 {
 			here += fmt.Sprintf(" · %d below", f.Total-len(f.Sessions))
 		}
 		lines = append(lines, bold.Render(ansi.Truncate(label, w-24, "…"))+muted.Render(here))
@@ -622,9 +634,6 @@ func (m Model) itemText(f *Folder, it item) (left, right string, markCol color.C
 			}
 		}
 		text := s.Title
-		if f != nil && f.Path == runningPath {
-			text += "  " + DisplayPath(s.Cwd, m.homeDir)
-		}
 		if n := agentCount(s.Agents); n > 0 {
 			fold := "▸"
 			if m.shownAgents[s.ID] {
@@ -702,6 +711,19 @@ func (m Model) footer() string {
 }
 
 // Helpers
+
+func isRunningPath(path string) bool {
+	return path == runningPath || strings.HasPrefix(path, runningPath+"/")
+}
+
+// prefixPaths moves a tree's folder paths under prefix, so the running
+// section's folders never share a key with the full tree's.
+func prefixPaths(folders []*Folder, prefix string) {
+	for _, f := range folders {
+		f.Path = prefix + f.Path
+		prefixPaths(f.Folders, prefix)
+	}
+}
 
 func agentCount(agents []Agent) int {
 	n := 0

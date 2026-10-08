@@ -119,6 +119,7 @@ func (s Store) Load() ([]Session, error) {
 	}()
 
 	fresh := map[string]cacheEntry{}
+	folders := newFolderResolver()
 	var sessions []Session
 	for r := range results {
 		fresh[r.path] = r.entry
@@ -131,7 +132,7 @@ func (s Store) Load() ([]Session, error) {
 		}
 		session := Session{
 			ID:       id,
-			Cwd:      firstOf(info.Cwd, on.Cwd, "?"),
+			Cwd:      folders.resolve(firstOf(info.Cwd, on.Cwd), filepath.Base(filepath.Dir(r.path))),
 			Title:    firstOf(info.Custom, info.Title, info.Prompt, "(untitled)"),
 			Prompt:   info.Prompt,
 			Updated:  time.UnixMilli(r.entry.Stamp[1]),
@@ -216,6 +217,92 @@ func loadAgents(dir string) []Agent {
 		return nil
 	})
 	return orderAgents(groupWorkflows(agents))
+}
+
+// folderResolver finds where a session belongs on this machine. A transcript
+// copied from another machine keeps that machine's cwd (/Users/kate/...), so
+// when the recorded folder is missing it decodes the project folder the
+// transcript is filed under (-home-k-rock-playa) back to a real path.
+type folderResolver struct {
+	exists  map[string]bool
+	decoded map[string]string
+	entries map[string][]string
+}
+
+func newFolderResolver() *folderResolver {
+	return &folderResolver{exists: map[string]bool{}, decoded: map[string]string{}, entries: map[string][]string{}}
+}
+
+func (r *folderResolver) resolve(cwd, projectKey string) string {
+	if cwd != "" && r.isDir(cwd) {
+		return cwd
+	}
+	path, ok := r.decoded[projectKey]
+	if !ok {
+		path = r.decode(projectKey)
+		r.decoded[projectKey] = path
+	}
+	return firstOf(path, cwd, "?")
+}
+
+// decode turns a project key back into an existing directory. The key is the
+// path with every non-alphanumeric character replaced by "-", so each "-" is
+// a "/", or a "-", ".", "_" or " " inside a name; the file system decides.
+func (r *folderResolver) decode(key string) string {
+	tokens := strings.Split(strings.TrimPrefix(key, "-"), "-")
+	var found string
+	var walk func(i int, dir, name string)
+	walk = func(i int, dir, name string) {
+		if found != "" {
+			return
+		}
+		if i == len(tokens) {
+			if p := dir + "/" + name; r.isDir(p) {
+				found = p
+			}
+			return
+		}
+		tok := tokens[i]
+		if p := dir + "/" + name; name != "" && r.isDir(p) {
+			walk(i+1, p, tok)
+		}
+		for _, sep := range []string{"-", ".", "_", " "} {
+			if next := name + sep + tok; r.hasPrefix(dir, next) {
+				walk(i+1, dir, next)
+			}
+		}
+	}
+	if len(tokens) > 0 {
+		walk(1, "", tokens[0])
+	}
+	return found
+}
+
+func (r *folderResolver) isDir(path string) bool {
+	is, ok := r.exists[path]
+	if !ok {
+		st, err := os.Stat(path)
+		is = err == nil && st.IsDir()
+		r.exists[path] = is
+	}
+	return is
+}
+
+func (r *folderResolver) hasPrefix(dir, prefix string) bool {
+	names, ok := r.entries[dir]
+	if !ok {
+		list, _ := os.ReadDir(firstOf(dir, "/"))
+		for _, e := range list {
+			names = append(names, e.Name())
+		}
+		r.entries[dir] = names
+	}
+	for _, n := range names {
+		if strings.HasPrefix(n, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // groupWorkflows gives each workflow run a row of its own, parenting the
