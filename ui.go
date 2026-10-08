@@ -52,6 +52,7 @@ type Model struct {
 	filter      string
 	isFiltering bool
 	isLiveOnly  bool
+	isScripted  bool // showing headless claude -p / SDK runs
 	isLoading   bool
 
 	width, height int
@@ -150,6 +151,9 @@ func (m Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.isFiltering = true
 	case "a":
 		m.isLiveOnly = !m.isLiveOnly
+		m.rebuild()
+	case "s":
+		m.isScripted = !m.isScripted
 		m.rebuild()
 	case "r":
 		m.isLoading, m.message = true, ""
@@ -311,6 +315,9 @@ func (m *Model) rebuild() {
 		if m.isLiveOnly && !s.Live {
 			continue
 		}
+		if s.Scripted && !s.Live && !m.isScripted {
+			continue
+		}
 		if m.filter != "" && !matches(s, m.filter, m.homeDir) {
 			continue
 		}
@@ -461,14 +468,24 @@ func (m Model) render() string {
 }
 
 func (m Model) header() string {
-	live := 0
+	live, scripted := 0, 0
 	for _, s := range m.sessions {
 		if s.Live {
 			live++
+		} else if s.Scripted {
+			scripted++
 		}
 	}
+	shown := len(m.sessions)
+	if !m.isScripted {
+		shown -= scripted
+	}
 	title := bold.Render("Claude sessions")
-	stats := muted.Render(fmt.Sprintf("  %d sessions · ", len(m.sessions))) + lipgloss.NewStyle().Foreground(liveCol).Render(fmt.Sprintf("%d running", live))
+	stats := muted.Render(fmt.Sprintf("  %d sessions · ", shown)) + lipgloss.NewStyle().Foreground(liveCol).Render(fmt.Sprintf("%d running", live))
+	if scripted > 0 {
+		verb := map[bool]string{true: "shown", false: "hidden"}[m.isScripted]
+		stats += muted.Render(fmt.Sprintf(" · %d scripted %s", scripted, verb))
+	}
 	if m.isLoading {
 		stats += muted.Render("  · scanning…")
 	}
@@ -680,7 +697,7 @@ func (m Model) footer() string {
 	} else {
 		keys += "open"
 	}
-	keys += "  / filter  a running only  r rescan  q quit"
+	keys += "  / filter  a running only  s scripted  r rescan  q quit"
 	return muted.Render(ansi.Truncate(keys, m.width, "…"))
 }
 

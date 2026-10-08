@@ -27,6 +27,9 @@ type Session struct {
 	Status  string    `json:"status"`
 	PID     int       `json:"pid"`
 	Agents  []Agent   `json:"-"`
+	// Scripted marks a headless run (claude -p, the SDK) rather than one a
+	// person typed into.
+	Scripted bool `json:"scripted"`
 }
 
 // Agent is a subagent a session spawned, from <session>/subagents/.
@@ -62,7 +65,7 @@ func DefaultStore() Store {
 	if cache == "" {
 		cache = filepath.Join(home(), ".cache")
 	}
-	return Store{ClaudeDir: claude, CacheFile: filepath.Join(cache, "cctree", "index.json")}
+	return Store{ClaudeDir: claude, CacheFile: filepath.Join(cache, "cctree", "index-v2.json")}
 }
 
 // Load returns every session with a transcript, plus live ones that have
@@ -127,12 +130,13 @@ func (s Store) Load() ([]Session, error) {
 			continue
 		}
 		session := Session{
-			ID:      id,
-			Cwd:     firstOf(info.Cwd, on.Cwd, "?"),
-			Title:   firstOf(info.Custom, info.Title, info.Prompt, "(untitled)"),
-			Prompt:  info.Prompt,
-			Updated: time.UnixMilli(r.entry.Stamp[1]),
-			Agents:  r.agents,
+			ID:       id,
+			Cwd:      firstOf(info.Cwd, on.Cwd, "?"),
+			Title:    firstOf(info.Custom, info.Title, info.Prompt, "(untitled)"),
+			Prompt:   info.Prompt,
+			Updated:  time.UnixMilli(r.entry.Stamp[1]),
+			Agents:   r.agents,
+			Scripted: info.Entrypoint == "sdk-cli" || strings.HasPrefix(info.Entrypoint, "sdk-"),
 		}
 		if isLive {
 			session.Live, session.Status, session.PID = true, on.Status, on.PID
@@ -279,11 +283,12 @@ func orderAgents(agents []Agent) []Agent {
 }
 
 type transcriptInfo struct {
-	Cwd       string `json:"cwd"`
-	Title     string `json:"title"`
-	Custom    string `json:"custom"`
-	Prompt    string `json:"prompt"`
-	Sidechain bool   `json:"sidechain"`
+	Cwd        string `json:"cwd"`
+	Title      string `json:"title"`
+	Custom     string `json:"custom"`
+	Prompt     string `json:"prompt"`
+	Sidechain  bool   `json:"sidechain"`
+	Entrypoint string `json:"entrypoint"`
 }
 
 type cacheEntry struct {
@@ -302,6 +307,7 @@ type row struct {
 	Summary     string          `json:"summary"`
 	IsMeta      bool            `json:"isMeta"`
 	IsSidechain bool            `json:"isSidechain"`
+	Entrypoint  string          `json:"entrypoint"`
 	Message     json.RawMessage `json:"message"`
 }
 
@@ -347,6 +353,9 @@ func parseTranscript(blob []byte) transcriptInfo {
 		}
 		if info.Cwd == "" && r.Cwd != "" {
 			info.Cwd = r.Cwd
+		}
+		if info.Entrypoint == "" && r.Entrypoint != "" {
+			info.Entrypoint = r.Entrypoint
 		}
 		switch r.Type {
 		case "ai-title":

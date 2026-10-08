@@ -46,6 +46,7 @@ Run `cctree`.
 | `o` | resume a past session in a new terminal window |
 | `/` | filter by title, first prompt, folder or id |
 | `a` | running sessions only |
+| `s` | show scripted sessions (headless `claude -p` and SDK runs), hidden by default |
 | `r` | rescan |
 | `q` | quit |
 
