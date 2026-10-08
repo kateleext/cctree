@@ -562,12 +562,12 @@ func (m Model) renderList(w, h int) string {
 	var lines []string
 	if f != nil {
 		label := strings.TrimPrefix(f.Path, runningPath+"/")
-		if f.Path == runningPath {
-			label = "running now"
-		}
 		here := fmt.Sprintf("  %d here", len(f.Sessions))
 		if len(f.Folders) > 0 {
 			here += fmt.Sprintf(" · %d below", f.Total-len(f.Sessions))
+		}
+		if f.Path == runningPath {
+			label, here = "running now", fmt.Sprintf("  %d sessions", f.Live)
 		}
 		lines = append(lines, bold.Render(ansi.Truncate(label, w-24, "…"))+muted.Render(here))
 	}
@@ -655,7 +655,7 @@ func (m Model) renderDetail(w int) string {
 		}
 		lines := []string{
 			rule,
-			bold.Render(ansi.Truncate(firstOf(a.Name, a.Description, a.ID), w, "…")) + "  " + muted.Render(kind+" · last write "+ago(a.Updated, m.now())+" ago"),
+			bold.Render(ansi.Truncate(firstOf(a.Name, a.Description, a.ID), w, "…")) + "  " + muted.Render(kind+" · last write "+agoPhrase(a.Updated, m.now())),
 			ansi.Truncate(a.Description, w, "…"),
 			muted.Render(ansi.Truncate("in "+it.session.Title+"  ·  "+DisplayPath(a.Path, m.homeDir), w, "…")),
 		}
@@ -663,7 +663,7 @@ func (m Model) renderDetail(w int) string {
 	}
 	if it, ok := m.current(); ok && it.folder != nil {
 		f := it.folder
-		lines := []string{rule, bold.Render(f.Path) + "  " + muted.Render(fmt.Sprintf("%d sessions, %d running, last active %s ago", f.Total, f.Live, ago(f.Latest, m.now())))}
+		lines := []string{rule, bold.Render(strings.TrimPrefix(f.Path, runningPath+"/")) + "  " + muted.Render(fmt.Sprintf("%d sessions, %d running, last active %s", f.Total, f.Live, agoPhrase(f.Latest, m.now())))}
 		return fill(lines, w, detailHeight)
 	}
 	s, ok := m.session()
@@ -673,7 +673,7 @@ func (m Model) renderDetail(w int) string {
 		}
 		return fill([]string{rule}, w, detailHeight)
 	}
-	state := muted.Render("last active " + s.Updated.Format("Mon Jan 2 15:04") + " (" + ago(s.Updated, m.now()) + " ago)")
+	state := muted.Render("last active " + s.Updated.Format("Mon Jan 2 15:04") + " (" + agoPhrase(s.Updated, m.now()) + ")")
 	if s.Live {
 		state = lipgloss.NewStyle().Foreground(liveCol).Render(fmt.Sprintf("● %s · pid %d", s.Status, s.PID))
 	}
@@ -711,6 +711,18 @@ func (m Model) footer() string {
 }
 
 // Helpers
+
+// agoPhrase reads as prose: "just now", "5m ago", "on Aug 20".
+func agoPhrase(t, now time.Time) string {
+	switch a := ago(t, now); {
+	case a == "now":
+		return "just now"
+	case now.Sub(t) < 7*24*time.Hour:
+		return a + " ago"
+	default:
+		return "on " + a
+	}
+}
 
 func isRunningPath(path string) bool {
 	return path == runningPath || strings.HasPrefix(path, runningPath+"/")
