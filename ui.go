@@ -333,7 +333,7 @@ func (m *Model) rebuild() {
 	}
 	m.root = BuildTree(shown, m.homeDir)
 	m.running = BuildTree(live, m.homeDir)
-	m.running.Path, m.running.Name = runningPath, "● running"
+	m.running.Path, m.running.Name = runningPath, "all"
 	prefixPaths(m.running.Folders, runningPath+"/")
 	m.flatten()
 	m.treeCursor = 0
@@ -471,7 +471,20 @@ func (m Model) render() string {
 	rightW := m.width - leftW
 	topH, previewH := m.panelHeights()
 
-	tree := panel("Folders", "", m.renderTree(leftW-4, topH-2), leftW, topH, m.focus == treePane)
+	runN := m.runningRows()
+	isInRunning := m.treeCursor < runN
+	tree := ""
+	foldersH := topH
+	if runN > 0 {
+		runH := min(runN+2, topH/2)
+		foldersH = topH - runH
+		tree = panel("Running", fmt.Sprint(m.running.Live), m.renderRows(0, runN, leftW-4, runH-2), leftW, runH, m.focus == treePane && isInRunning) + "\n"
+	}
+	total := 0
+	if m.root != nil {
+		total = m.root.Total
+	}
+	tree += panel("Folders", fmt.Sprint(total), m.renderRows(runN, len(m.rows), leftW-4, foldersH-2), leftW, foldersH, m.focus == treePane && !isInRunning)
 	title, count := m.listTitle()
 	list := panel(title, count, m.renderList(rightW-4, topH-2), rightW, topH, m.focus == listPane)
 	ptitle, pright, pbody := m.preview(m.width - 4)
@@ -521,10 +534,16 @@ func (m Model) header() string {
 	return line + muted.Render(strings.Repeat("─", max(0, m.width-lipgloss.Width(line))))
 }
 
-func (m Model) renderTree(w, h int) string {
-	top := scrollTop(m.treeCursor, h, len(m.rows))
+// renderRows draws tree rows [from, to) into a w×h box, scrolled to keep
+// the cursor in view when it is inside the range.
+func (m Model) renderRows(from, to, w, h int) string {
+	cursor := m.treeCursor - from
+	if cursor < 0 || cursor >= to-from {
+		cursor = 0
+	}
+	top := from + scrollTop(cursor, h, to-from)
 	var lines []string
-	for i := top; i < min(len(m.rows), top+h); i++ {
+	for i := top; i < min(to, top+h); i++ {
 		row := m.rows[i]
 		f := row.folder
 		isRunning := isRunningPath(f.Path)
@@ -537,36 +556,34 @@ func (m Model) renderTree(w, h int) string {
 		}
 		name := strings.Repeat("  ", row.depth) + marker + f.Name
 		count := fmt.Sprint(f.Total)
-		liveTxt := ""
 		if isRunning {
-			count = ""
-			if f.Path != runningPath {
-				liveTxt = fmt.Sprintf("●%d", f.Live)
-			} else {
-				count = fmt.Sprint(f.Live)
-			}
-		} else if f.Live > 0 {
-			liveTxt = fmt.Sprintf("●%d ", f.Live)
+			count = fmt.Sprint(f.Live)
 		}
-		room := w - len([]rune(count)) - len([]rune(liveTxt)) - 1
-		name = ansi.Truncate(name, room, "…")
-		pad := strings.Repeat(" ", max(1, w-lipgloss.Width(name)-len([]rune(liveTxt))-len(count)))
-		plain := name + pad + liveTxt + count
+		name = ansi.Truncate(name, w-len(count)-1, "…")
+		pad := strings.Repeat(" ", max(1, w-lipgloss.Width(name)-len(count)))
 		switch {
 		case i == m.treeCursor && m.focus == treePane:
-			lines = append(lines, selected.Render(plain))
+			lines = append(lines, selected.Render(name+pad+count))
 		case i == m.treeCursor:
-			lines = append(lines, dimSel.Render(plain))
-		case f.Path == runningPath:
-			lines = append(lines, lipgloss.NewStyle().Foreground(liveCol).Bold(true).Render(plain))
+			lines = append(lines, dimSel.Render(name+pad+count))
 		default:
-			lines = append(lines, name+pad+lipgloss.NewStyle().Foreground(liveCol).Render(liveTxt)+muted.Render(count))
+			lines = append(lines, name+pad+muted.Render(count))
 		}
 	}
-	if len(m.rows) == 0 {
+	if to == from {
 		lines = append(lines, muted.Render(map[bool]string{true: "scanning…", false: "no sessions"}[m.isLoading]))
 	}
 	return fill(lines, w, h)
+}
+
+// runningRows is how many tree rows belong to the running section, which
+// always comes first.
+func (m Model) runningRows() int {
+	n := 0
+	for n < len(m.rows) && isRunningPath(m.rows[n].folder.Path) {
+		n++
+	}
+	return n
 }
 
 func (m Model) renderList(w, h int) string {

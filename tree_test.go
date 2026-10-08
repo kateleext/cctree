@@ -62,7 +62,7 @@ func TestKeysExpandFilterAndResume(t *testing.T) {
 	next, _ = next.Update(loadedMsg{sessions: fixture()})
 	m = next.(Model)
 	view := ansi.Strip(m.render())
-	if !contains(view, "● running") || !contains(view, "work/apps") {
+	if !contains(view, "Running") || !contains(view, "work/apps") {
 		t.Fatalf("first view:\n%s", view)
 	}
 
