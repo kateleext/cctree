@@ -56,6 +56,7 @@ type Model struct {
 	isLoading   bool
 
 	width, height int
+	ticks         int
 	message       string
 
 	// Resume is set when the person picked a past session: main execs it
@@ -96,6 +97,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyLive(msg)
 	case tickMsg:
 		store := m.store
+		m.ticks++
+		if m.ticks%5 == 0 && !m.isLoading {
+			return m, tea.Batch(tick(), m.load()) // pick up new replies and sessions
+		}
 		return m, tea.Batch(tick(), func() tea.Msg { return liveMsg(store.Live()) })
 	case tea.KeyPressMsg:
 		return m.key(msg)
@@ -397,11 +402,16 @@ func (m Model) list() []item {
 		return nil
 	}
 	var out []item
-	for _, c := range f.Folders {
-		out = append(out, item{folder: c})
+	sessions := f.Sessions
+	if isRunningPath(f.Path) {
+		sessions = f.All() // the running section lists everything live beneath it
+	} else {
+		for _, c := range f.Folders {
+			out = append(out, item{folder: c})
+		}
 	}
-	for i := range f.Sessions {
-		s := &f.Sessions[i]
+	for i := range sessions {
+		s := &sessions[i]
 		out = append(out, item{session: s})
 		if m.shownAgents[s.ID] {
 			for j := range s.Agents {
@@ -449,26 +459,33 @@ var (
 )
 
 func (m Model) bodyHeight() int {
-	return max(3, m.height-4-detailHeight)
+	top, _ := m.panelHeights()
+	return max(3, top-2)
 }
 
-const detailHeight = 6
-
 func (m Model) render() string {
-	if m.width < 50 || m.height < 14 {
-		return "cctree needs at least 50×14"
+	if m.width < 60 || m.height < 18 {
+		return fmt.Sprintf("cctree needs at least 60×18 (now %d×%d)", m.width, m.height)
 	}
-	header := m.header()
-	leftW := clamp(m.width/3, 28, 48)
-	rightW := m.width - leftW - 3
-	h := m.bodyHeight()
+	leftW := clamp(m.width/3, 30, 52)
+	rightW := m.width - leftW
+	topH, previewH := m.panelHeights()
 
-	left := m.renderTree(leftW, h)
-	right := m.renderList(rightW, h)
-	sep := muted.Render(strings.TrimSuffix(strings.Repeat(" │ \n", h), "\n"))
-	body := lipgloss.JoinHorizontal(lipgloss.Top, left, sep, right)
+	tree := panel("Folders", "", m.renderTree(leftW-4, topH-2), leftW, topH, m.focus == treePane)
+	title, count := m.listTitle()
+	list := panel(title, count, m.renderList(rightW-4, topH-2), rightW, topH, m.focus == listPane)
+	ptitle, pright, pbody := m.preview(m.width - 4)
+	prev := panel(ptitle, pright, pbody, m.width, previewH, false)
 
-	return strings.Join([]string{header, "", body, m.renderDetail(m.width), m.footer()}, "\n")
+	return strings.Join([]string{m.header(), lipgloss.JoinHorizontal(lipgloss.Top, tree, list), prev, m.footer()}, "\n")
+}
+
+// panelHeights splits the body between the browsing panels and the preview,
+// which takes about two fifths.
+func (m Model) panelHeights() (top, preview int) {
+	body := m.height - 2
+	preview = clamp(body*2/5, 9, 24)
+	return body - preview, preview
 }
 
 func (m Model) header() string {
@@ -484,28 +501,24 @@ func (m Model) header() string {
 	if !m.isScripted {
 		shown -= scripted
 	}
-	title := bold.Render("Claude sessions")
-	stats := muted.Render(fmt.Sprintf("  %d sessions · ", shown)) + lipgloss.NewStyle().Foreground(liveCol).Render(fmt.Sprintf("%d running", live))
+	parts := []string{bold.Render("cctree"), muted.Render(fmt.Sprintf("%d sessions", shown)), lipgloss.NewStyle().Foreground(liveCol).Render(fmt.Sprintf("%d running", live))}
 	if scripted > 0 {
-		verb := map[bool]string{true: "shown", false: "hidden"}[m.isScripted]
-		stats += muted.Render(fmt.Sprintf(" · %d scripted %s", scripted, verb))
+		parts = append(parts, muted.Render(fmt.Sprintf("%d scripted %s", scripted, map[bool]string{true: "shown", false: "hidden"}[m.isScripted])))
 	}
 	if m.isLoading {
-		stats += muted.Render("  · scanning…")
+		parts = append(parts, muted.Render("scanning…"))
 	}
-	var right string
 	switch {
 	case m.isFiltering:
-		right = "/" + m.filter + "█"
+		parts = append(parts, lipgloss.NewStyle().Foreground(accent).Render("/"+m.filter+"█"))
 	case m.filter != "":
-		right = muted.Render("filter: ") + m.filter
+		parts = append(parts, lipgloss.NewStyle().Foreground(accent).Render("filter: "+m.filter))
 	}
 	if m.isLiveOnly {
-		right += lipgloss.NewStyle().Foreground(liveCol).Render("  [running only]")
+		parts = append(parts, lipgloss.NewStyle().Foreground(liveCol).Render("running only"))
 	}
-	line := title + stats
-	gap := m.width - lipgloss.Width(line) - lipgloss.Width(right)
-	return line + strings.Repeat(" ", max(1, gap)) + right
+	line := muted.Render("── ") + strings.Join(parts, muted.Render(" · ")) + " "
+	return line + muted.Render(strings.Repeat("─", max(0, m.width-lipgloss.Width(line))))
 }
 
 func (m Model) renderTree(w, h int) string {
@@ -560,18 +573,6 @@ func (m Model) renderList(w, h int) string {
 	f := m.folder()
 	list := m.list()
 	var lines []string
-	if f != nil {
-		label := strings.TrimPrefix(f.Path, runningPath+"/")
-		here := fmt.Sprintf("  %d here", len(f.Sessions))
-		if len(f.Folders) > 0 {
-			here += fmt.Sprintf(" · %d below", f.Total-len(f.Sessions))
-		}
-		if f.Path == runningPath {
-			label, here = "running now", fmt.Sprintf("  %d sessions", f.Live)
-		}
-		lines = append(lines, bold.Render(ansi.Truncate(label, w-24, "…"))+muted.Render(here))
-	}
-	h--
 	top := scrollTop(m.listCursor, h, len(list))
 	for i := top; i < min(len(list), top+h); i++ {
 		left, right, markCol, isDim := m.itemText(f, list[i])
@@ -598,7 +599,7 @@ func (m Model) renderList(w, h int) string {
 	if len(list) == 0 && f != nil {
 		lines = append(lines, muted.Render("no sessions at this level"))
 	}
-	return fill(lines, w, h+1)
+	return fill(lines, w, h)
 }
 
 // itemText lays out one right-pane row: the text, the right-hand column,
@@ -634,6 +635,11 @@ func (m Model) itemText(f *Folder, it item) (left, right string, markCol color.C
 			}
 		}
 		text := s.Title
+		if f != nil && isRunningPath(f.Path) {
+			if rel := strings.TrimPrefix(strings.TrimPrefix(DisplayPath(s.Cwd, m.homeDir), strings.TrimPrefix(f.Path, runningPath+"/")), "/"); rel != "" {
+				text += "  · " + rel
+			}
+		}
 		if n := agentCount(s.Agents); n > 0 {
 			fold := "▸"
 			if m.shownAgents[s.ID] {
@@ -645,52 +651,90 @@ func (m Model) itemText(f *Folder, it item) (left, right string, markCol color.C
 	}
 }
 
-func (m Model) renderDetail(w int) string {
-	rule := muted.Render(strings.Repeat("─", w))
-	if it, ok := m.current(); ok && it.agent != nil {
+// preview describes the selected row: its title, a right-hand status and
+// the body lines, at most w cells wide.
+func (m Model) preview(w int) (title, right, body string) {
+	_, h := m.panelHeights()
+	h -= 2
+	label := lipgloss.NewStyle().Foreground(accent).Bold(true)
+	it, ok := m.current()
+	switch {
+	case !ok:
+		return "Preview", "", fill([]string{muted.Render(firstOf(m.message, "nothing selected"))}, w, h)
+	case it.folder != nil:
+		f := it.folder
+		lines := []string{
+			muted.Render(fmt.Sprintf("%d sessions · %d running · last active %s", f.Total, f.Live, agoPhrase(f.Latest, m.now()))),
+			"",
+		}
+		for _, sub := range f.Folders {
+			lines = append(lines, fmt.Sprintf("  ▸ %-24s %s", sub.Name+"/", muted.Render(fmt.Sprintf("%d sessions", sub.Total))))
+		}
+		return strings.TrimPrefix(f.Path, runningPath+"/"), "", fill(lines, w, h)
+	case it.agent != nil:
 		a := it.agent
-		kind := "subagent · " + firstOf(a.Type, "agent")
+		kind := firstOf(a.Type, "agent")
 		if a.Workflow != "" {
-			kind += " · workflow " + a.Workflow
+			kind += " · " + a.Workflow
 		}
 		lines := []string{
-			rule,
-			bold.Render(ansi.Truncate(firstOf(a.Name, a.Description, a.ID), w, "…")) + "  " + muted.Render(kind+" · last write "+agoPhrase(a.Updated, m.now())),
-			ansi.Truncate(a.Description, w, "…"),
-			muted.Render(ansi.Truncate("in "+it.session.Title+"  ·  "+DisplayPath(a.Path, m.homeDir), w, "…")),
+			muted.Render(ansi.Truncate("subagent of “"+it.session.Title+"” · "+kind, w, "…")),
+			"",
+			label.Render("Task"),
 		}
-		return fill(lines, w, detailHeight)
+		lines = append(lines, wrap(firstOf(a.Description, "(no description)"), w, 3)...)
+		lines = append(lines, "", muted.Render(ansi.Truncate(DisplayPath(a.Path, m.homeDir), w, "…")))
+		return firstOf(a.Name, a.ID), agoPhrase(a.Updated, m.now()), fill(lines, w, h)
 	}
-	if it, ok := m.current(); ok && it.folder != nil {
-		f := it.folder
-		lines := []string{rule, bold.Render(strings.TrimPrefix(f.Path, runningPath+"/")) + "  " + muted.Render(fmt.Sprintf("%d sessions, %d running, last active %s", f.Total, f.Live, agoPhrase(f.Latest, m.now())))}
-		return fill(lines, w, detailHeight)
-	}
-	s, ok := m.session()
-	if !ok {
-		if m.message != "" {
-			return fill([]string{rule, m.message}, w, detailHeight)
-		}
-		return fill([]string{rule}, w, detailHeight)
-	}
-	state := muted.Render("last active " + s.Updated.Format("Mon Jan 2 15:04") + " (" + agoPhrase(s.Updated, m.now()) + ")")
+
+	s := it.session
+	right = muted.Render(agoPhrase(s.Updated, m.now()))
 	if s.Live {
-		state = lipgloss.NewStyle().Foreground(liveCol).Render(fmt.Sprintf("● %s · pid %d", s.Status, s.PID))
+		right = lipgloss.NewStyle().Foreground(liveCol).Render("● " + s.Status)
 	}
-	prompt := s.Prompt
-	if prompt == "" {
-		prompt = "(no prompt yet)"
+	meta := DisplayPath(s.Cwd, m.homeDir) + " · " + s.ID[:min(8, len(s.ID))]
+	if n := agentCount(s.Agents); n > 0 {
+		meta += fmt.Sprintf(" · %d agents", n)
 	}
-	lines := []string{
-		rule,
-		bold.Render(ansi.Truncate(s.Title, w, "…")) + "  " + state,
-		muted.Render(ansi.Truncate(DisplayPath(s.Cwd, m.homeDir)+"  ·  "+s.ID, w, "…")),
-		ansi.Truncate("› "+prompt, w, "…"),
-	}
+	lines := []string{muted.Render(ansi.Truncate(meta, w, "…"))}
 	if m.message != "" {
 		lines = append(lines, lipgloss.NewStyle().Foreground(accent).Render(ansi.Truncate(m.message, w, "…")))
 	}
-	return fill(lines, w, detailHeight)
+	lines = append(lines, "")
+	room := h - len(lines)
+	you := wrap(firstOf(s.LastPrompt, s.Prompt, "(no prompt yet)"), w-8, max(1, room/3))
+	lines = append(lines, label.Render("You     ")+you[0])
+	for _, l := range you[1:] {
+		lines = append(lines, "        "+l)
+	}
+	if s.LastReply != "" {
+		reply := wrap(s.LastReply, w-8, max(1, h-len(lines)-1))
+		lines = append(lines, "", lipgloss.NewStyle().Foreground(liveCol).Bold(true).Render("Claude  ")+reply[0])
+		for _, l := range reply[1:] {
+			lines = append(lines, "        "+l)
+		}
+	}
+	return s.Title, right, fill(lines, w, h)
+}
+
+// listTitle is the right panel's border title: where you are and how many.
+func (m Model) listTitle() (string, string) {
+	f := m.folder()
+	if f == nil {
+		return "Sessions", ""
+	}
+	if isRunningPath(f.Path) {
+		label := "Running now"
+		if f.Path != runningPath {
+			label = "Running in " + strings.TrimPrefix(f.Path, runningPath+"/")
+		}
+		return label, fmt.Sprint(f.Live)
+	}
+	count := fmt.Sprintf("%d here", len(f.Sessions))
+	if len(f.Folders) > 0 {
+		count += fmt.Sprintf(" · %d below", f.Total-len(f.Sessions))
+	}
+	return f.Path, count
 }
 
 func (m Model) footer() string {
@@ -711,6 +755,60 @@ func (m Model) footer() string {
 }
 
 // Helpers
+
+// panel draws body inside a rounded border with title set into the top
+// edge and right at its end; focus colours the border.
+func panel(title, right, body string, w, h int, isFocused bool) string {
+	border := muted
+	if isFocused {
+		border = lipgloss.NewStyle().Foreground(accent)
+	}
+	titleStyle := bold
+	if isFocused {
+		titleStyle = bold.Foreground(accent)
+	}
+	inner := w - 2
+	t := ""
+	if title != "" {
+		t = " " + titleStyle.Render(ansi.Truncate(title, max(1, inner-lipgloss.Width(right)-8), "…")) + " "
+	}
+	r := ""
+	if right != "" {
+		r = " " + right + " "
+	}
+	gap := max(0, inner-1-lipgloss.Width(t)-lipgloss.Width(r)-1)
+	top := border.Render("╭─") + t + border.Render(strings.Repeat("─", gap)) + muted.Render(r) + border.Render("─╮")
+	lines := []string{top}
+	for _, l := range strings.Split(fill(strings.Split(body, "\n"), inner-2, h-2), "\n") {
+		lines = append(lines, border.Render("│")+" "+l+" "+border.Render("│"))
+	}
+	lines = append(lines, border.Render("╰"+strings.Repeat("─", inner)+"╯"))
+	return strings.Join(lines, "\n")
+}
+
+// wrap word-wraps text to width, keeping at most n lines (the last one
+// ending in … when cut). It always returns at least one line.
+func wrap(text string, width, n int) []string {
+	var out []string
+	for _, para := range strings.Split(strings.TrimSpace(text), "\n") {
+		para = strings.Join(strings.Fields(para), " ")
+		if para == "" {
+			continue
+		}
+		out = append(out, strings.Split(lipgloss.NewStyle().Width(max(10, width)).Render(para), "\n")...)
+	}
+	if len(out) == 0 {
+		return []string{""}
+	}
+	if len(out) > n {
+		out = out[:n]
+		out[n-1] = ansi.Truncate(strings.TrimRight(out[n-1], " ")+" …", width, "…")
+	}
+	for i := range out {
+		out[i] = strings.TrimRight(out[i], " ")
+	}
+	return out
+}
 
 // agoPhrase reads as prose: "just now", "5m ago", "on Aug 20".
 func agoPhrase(t, now time.Time) string {

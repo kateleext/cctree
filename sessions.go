@@ -18,15 +18,18 @@ import (
 )
 
 type Session struct {
-	ID      string    `json:"id"`
-	Cwd     string    `json:"cwd"`
-	Title   string    `json:"title"`
-	Prompt  string    `json:"prompt"`
-	Updated time.Time `json:"updated"`
-	Live    bool      `json:"live"`
-	Status  string    `json:"status"`
-	PID     int       `json:"pid"`
-	Agents  []Agent   `json:"-"`
+	ID     string `json:"id"`
+	Cwd    string `json:"cwd"`
+	Title  string `json:"title"`
+	Prompt string `json:"prompt"`
+	// LastPrompt and LastReply are the latest exchange, for the preview.
+	LastPrompt string    `json:"lastPrompt"`
+	LastReply  string    `json:"lastReply"`
+	Updated    time.Time `json:"updated"`
+	Live       bool      `json:"live"`
+	Status     string    `json:"status"`
+	PID        int       `json:"pid"`
+	Agents     []Agent   `json:"-"`
 	// Scripted marks a headless run (claude -p, the SDK) rather than one a
 	// person typed into.
 	Scripted bool `json:"scripted"`
@@ -65,7 +68,7 @@ func DefaultStore() Store {
 	if cache == "" {
 		cache = filepath.Join(home(), ".cache")
 	}
-	return Store{ClaudeDir: claude, CacheFile: filepath.Join(cache, "cctree", "index-v2.json")}
+	return Store{ClaudeDir: claude, CacheFile: filepath.Join(cache, "cctree", "index-v3.json")}
 }
 
 // Load returns every session with a transcript, plus live ones that have
@@ -131,13 +134,15 @@ func (s Store) Load() ([]Session, error) {
 			continue
 		}
 		session := Session{
-			ID:       id,
-			Cwd:      folders.resolve(firstOf(info.Cwd, on.Cwd), filepath.Base(filepath.Dir(r.path))),
-			Title:    firstOf(info.Custom, info.Title, info.Prompt, "(untitled)"),
-			Prompt:   info.Prompt,
-			Updated:  time.UnixMilli(r.entry.Stamp[1]),
-			Agents:   r.agents,
-			Scripted: info.Entrypoint == "sdk-cli" || strings.HasPrefix(info.Entrypoint, "sdk-"),
+			ID:         id,
+			Cwd:        folders.resolve(firstOf(info.Cwd, on.Cwd), filepath.Base(filepath.Dir(r.path))),
+			Title:      firstOf(info.Custom, info.Title, info.Prompt, "(untitled)"),
+			Prompt:     info.Prompt,
+			LastPrompt: info.LastPrompt,
+			LastReply:  info.LastReply,
+			Updated:    time.UnixMilli(r.entry.Stamp[1]),
+			Agents:     r.agents,
+			Scripted:   info.Entrypoint == "sdk-cli" || strings.HasPrefix(info.Entrypoint, "sdk-"),
 		}
 		if isLive {
 			session.Live, session.Status, session.PID = true, on.Status, on.PID
@@ -374,6 +379,8 @@ type transcriptInfo struct {
 	Title      string `json:"title"`
 	Custom     string `json:"custom"`
 	Prompt     string `json:"prompt"`
+	LastPrompt string `json:"lastPrompt"`
+	LastReply  string `json:"lastReply"`
 	Sidechain  bool   `json:"sidechain"`
 	Entrypoint string `json:"entrypoint"`
 }
@@ -462,15 +469,22 @@ func parseTranscript(blob []byte) transcriptInfo {
 				info.Title = r.Summary
 			}
 		case "user":
-			if sawPrompt || r.IsMeta {
+			if r.IsMeta {
 				continue
 			}
-			if r.IsSidechain {
+			if r.IsSidechain && !sawPrompt {
 				info.Sidechain = true
 			}
 			if text := messageText(r.Message); !isNoise(text) {
-				info.Prompt = truncate(strings.Join(strings.Fields(text), " "), 200)
-				sawPrompt = true
+				if !sawPrompt {
+					info.Prompt = truncate(oneLine(text), 200)
+					sawPrompt = true
+				}
+				info.LastPrompt = truncate(strings.TrimSpace(text), 600)
+			}
+		case "assistant":
+			if text := strings.TrimSpace(messageText(r.Message)); text != "" {
+				info.LastReply = truncate(text, 1200)
 			}
 		}
 	}

@@ -16,8 +16,8 @@ Claude sessions  1240 sessions · 4 running
                                              │     ↳ review — correctness              2d
 ```
 - **Left:** folders, each with its running (●) and total session counts. Folders with running sessions sort first; `● running` collects every live session.
-- **Right:** the selected folder's own level — its subfolders, then the sessions started in it. Sessions that spawned subagents expand to show them, nested by who spawned whom, with workflow runs grouped.
-- **Bottom:** the selected session's title, folder, id and first prompt.
+- **Right:** the selected folder's own level (or, for `● running`, every running session at once) — its subfolders, then the sessions started in it. Sessions that spawned subagents expand to show them, nested by who spawned whom, with workflow runs grouped.
+- **Preview:** the selected session's latest exchange — your last message and Claude's last reply — refreshed every few seconds while it runs.
 
 ## Install
 
